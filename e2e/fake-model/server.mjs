@@ -15,6 +15,8 @@ const rules = [
   { match: /慢A/, stream: ["慢", "A", "回答", "完毕"], delay: 800 },
   { match: /慢B/, stream: ["慢", "B", "回答", "完毕"], delay: 400 },
   { match: /结合一下这两条/, text: "已结合两条路：分支A说A，分支B说B" },
+  { match: /问题A/, text: "回答A：苹果" },
+  { match: /问题B/, text: "回答B：香蕉" },
   // ---- 内核验收用 ----
   { match: /Exercise the packaged minimal agent/, tool: "cd /tmp && pwd" }, // 第二个 tool call 由 tool 分支处理
   { match: /先切换到 \/tmp/, tool: "cd /tmp && export X=1" },
@@ -110,9 +112,17 @@ const server = http.createServer((req, res) => {
       sendText([`基于结果回答：${outs.join(" | ")}`]);
       return;
     }
-    const text = typeof last.content === "string"
-      ? last.content
-      : JSON.stringify(last.content ?? "");
+    // 内容可能是 parts 数组（连续 user 消息在 wire 上合并）：
+    // 提示词 = 最后一个非 runtime-context / 非来路标记的 part
+    let text = "";
+    if (typeof last.content === "string") {
+      text = last.content;
+    } else if (Array.isArray(last.content)) {
+      const parts = last.content
+        .map((p) => String(p?.text ?? ""))
+        .filter((t) => !t.startsWith("Current runtime context.") && !t.startsWith("[来路 "));
+      text = parts.at(-1) ?? "";
+    }
     const rule = rules.find((r) => r.match.test(text));
     if (rule.tools) sendTools(rule.tools);
     else if (rule.tool) sendTools([rule.tool]);

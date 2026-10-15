@@ -316,6 +316,46 @@ pub struct ProviderCfg {
 pub struct LlmConfig {
     #[serde(default)]
     pub providers: Vec<ProviderCfg>,
+    /// SPEC §2.3 的形状（Exterior）：models 数组 + default。与 providers 等价，加载时映射。
+    #[serde(default)]
+    pub models: Vec<ModelCfg>,
+    #[serde(default)]
+    pub default: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ModelCfg {
+    pub name: String,
+    pub base_url: String,
+    #[serde(default)]
+    pub api_key_env: Option<String>,
+    pub model: String,
+}
+
+impl LlmConfig {
+    /// 统一成 providers 视图：providers 优先，否则映射 models
+    pub fn providers(&self) -> Vec<ProviderCfg> {
+        if !self.providers.is_empty() {
+            return self.providers.clone();
+        }
+        self.models
+            .iter()
+            .map(|m| ProviderCfg {
+                name: m.name.clone(),
+                base_url: m.base_url.clone(),
+                api_key_env: m.api_key_env.clone(),
+                retry_policy: None,
+            })
+            .collect()
+    }
+    /// SPEC §2.3：按模型名找到（provider, model id）
+    pub fn find_model(&self, name: &str) -> Option<&ModelCfg> {
+        self.models.iter().find(|m| m.name == name)
+    }
+    pub fn default_model(&self) -> Option<&ModelCfg> {
+        let name = self.default.as_deref()?;
+        self.find_model(name)
+    }
 }
 
 pub fn read_llm_config() -> Result<LlmConfig, String> {

@@ -55,7 +55,15 @@ impl AgentManager {
 
     pub fn append_full(&self, session_id: &str, kind: &str, data: Value, surface_op: Option<Value>, srcs: Option<Vec<u64>>) {
         let Some(agent) = self.get(session_id) else { return };
-        let ev = agent.session.lock().unwrap().append_full(kind, data, surface_op, srcs);
+        let ev = {
+            let mut session = agent.session.lock().unwrap();
+            let ev = session.append_full(kind, data, surface_op, srcs);
+            // 投影同步观察（SPEC §3：DAG 插件在此维护节点链，保证下一步 derive 最新）
+            if let Some(proj) = self.session_services.projection.read().unwrap().as_ref() {
+                proj.observe(session_id, &session, &ev);
+            }
+            ev
+        };
         if let Some(p) = self.session_services.persistence.read().unwrap().as_ref() {
             if let Err(e) = p.persist_event(session_id, &ev) {
                 eprintln!("[sessions] 持久化失败 {session_id} {kind}: {e}");
@@ -69,6 +77,23 @@ impl AgentManager {
         if *agent.status.borrow() != status {
             agent.status.send_replace(status.into()); // send() 在无接收者时不存储值，必须用 send_replace
             self.bus.emit(KernelEvent::AgentStatus { session_id: session_id.into(), status: status.into() });
+        }
+    }
+
+    /// 经投影服务推导模型历史（默认线性；Exterior 为 DAG）
+    pub fn derive(&self, session_id: &str, session: &Session) -> Vec<llm::Message> {
+        let proj = self.session_services.projection.read().unwrap().clone();
+        match proj {
+            Some(p) => p.derive(session_id, session),
+            None => session.derive_messages(),
+        }
+    }
+
+    /// 中止某 session 当前的工作（流式/工具执行都会停；已流出的部分保留）
+    pub fn cancel(&self, session_id: &str) {
+        if let Some(a) = self.get(session_id) {
+            a.cancel.store(true, Ordering::Relaxed);
+            a.wake.notify_one();
         }
     }
 
@@ -300,14 +325,20 @@ async fn run_step(
 
     let mut attempt = 0u32;
     let outcome: StreamOutcome = loop {
-        let wire_messages = llm::to_wire_messages(&agent.session.lock().unwrap().derive_messages());
+        let wire_messages = llm::to_wire_messages(&mgr.derive(sid, &agent.session.lock().unwrap()));
         let res = llm::stream_chat(
             &mgr.http,
             &StreamCtx { provider: provider.clone(), model: agent.model.clone(), max_tokens: agent.max_tokens },
             wire_messages,
             wire_tools.clone(),
             agent.cancel.clone(),
-            |_delta| {},
+            {
+                let bus = mgr.bus.clone();
+                let sid = sid.to_string();
+                move |delta: &str| {
+                    bus.emit(KernelEvent::AssistantDelta { session_id: sid.clone(), text: delta.to_string() });
+                }
+            },
         )
         .await;
         match res {
@@ -438,13 +469,13 @@ async fn execute_tool_calls(
             (idx, Some(execute_one(&mgr, &sid, &name, &args, &cwd, cancel.clone()).await))
         }));
     }
-    let mut results: Vec<Option<(String, bool)>> = vec![None; calls.len()];
+    let mut results: Vec<Option<(String, bool, Option<i64>)>> = vec![None; calls.len()];
     let mut aborted = false;
     for h in handles {
         match h.await {
             Ok((idx, Some(r))) => results[idx] = Some(r),
             Ok((idx, None)) => {
-                results[idx] = Some(("Error: tool call aborted before dispatch".into(), true));
+                results[idx] = Some(("Error: tool call aborted before dispatch".into(), true, None));
                 aborted = true;
             }
             Err(_) => {
@@ -453,11 +484,14 @@ async fn execute_tool_calls(
         }
     }
     for (idx, (id, _, _)) in calls.iter().enumerate() {
-        let (text, is_error) = results[idx].take().unwrap();
+        let (text, is_error, exit_code) = results[idx].take().unwrap();
         let msg = llm::create_tool_result_message(id, &text, is_error);
         let mut data = json!({"turn": turn, "step": step, "message": serde_json::to_value(msg).unwrap()});
         if is_error && text.contains("aborted before dispatch") {
             data["error"] = json!({"name": "AbortError", "code": "TOOL_ABORTED_BEFORE_DISPATCH"});
+        }
+        if let Some(code) = exit_code {
+            data["meta"] = json!({"exitCode": code});
         }
         mgr.append_full(sid, "tool/result", data, Some(json!("append")), Some(vec![call_seqs[idx]]));
     }
@@ -471,19 +505,24 @@ async fn execute_one(
     args_raw: &str,
     cwd: &str,
     cancel: Arc<AtomicBool>,
-) -> (String, bool) {
+) -> (String, bool, Option<i64>) {
     let args: Value = serde_json::from_str(args_raw).unwrap_or(json!({}));
     match name {
         "bash" => {
             let cmd = args.get("command").and_then(Value::as_str).unwrap_or("");
-            match mgr.bash.execute(sid, cmd, cwd, mgr.bash_config, cancel).await {
-                Ok(text) => (text, false),
-                Err(e) => (format!("Error: {e}"), true),
+            let bus = mgr.bus.clone();
+            let sid2 = sid.to_string();
+            let on_chunk: Arc<dyn Fn(&str) + Send + Sync> = Arc::new(move |chunk: &str| {
+                bus.emit(KernelEvent::BashChunk { session_id: sid2.clone(), chunk: chunk.to_string() });
+            });
+            match mgr.bash.execute(sid, cmd, cwd, mgr.bash_config, cancel, Some(on_chunk)).await {
+                Ok((text, code)) => (text, false, code),
+                Err(e) => (format!("Error: {e}"), true, None),
             }
         }
         "working_directory" if mgr.tools.has("working_directory") => {
             let Some(agent) = mgr.get(sid) else {
-                return ("Error: working_directory requires an agent Session".into(), true);
+                return ("Error: working_directory requires an agent Session".into(), true, None);
             };
             let result = {
                 let session = agent.session.lock().unwrap();
@@ -509,12 +548,12 @@ async fn execute_one(
                             followup(mgr, sid, notice);
                         }
                     }
-                    (dir, false)
+                    (dir, false, None)
                 }
-                Err(e) => (format!("Error: {e}"), true),
+                Err(e) => (format!("Error: {e}"), true, None),
             }
         }
-        _ => (format!("Error: unknown tool: {name}"), true),
+        _ => (format!("Error: unknown tool: {name}"), true, None),
     }
 }
 
