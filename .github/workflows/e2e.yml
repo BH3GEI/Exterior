@@ -1,0 +1,28 @@
+name: e2e
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  kernel:
+    name: 内核验收（SPEC §0.5）
+    strategy:
+      os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: kernel
+      - name: 编译内核
+        run: cargo build --manifest-path kernel/Cargo.toml
+      - name: 端到端验收（10 项）
+        run: node --test --test-concurrency=1 e2e/kernel/acceptance.test.mjs
+        env:
+          KERNEL_BIN: ${{ github.workspace }}/kernel/target/debug/exterior-kernel
