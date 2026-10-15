@@ -8,11 +8,12 @@ pub struct WorkingDirectory {
     pub default_directory: PathBuf,
 }
 
-pub fn context_text(cwd: &str) -> String {
-    format!("Current working directory: {}.", serde_json::to_string(cwd).unwrap())
-}
-
 impl WorkingDirectory {
+    /// runtime context 贡献（working-directory:current）
+    pub fn context_text(&self, session: &Session) -> String {
+        format!("Current working directory: {}.", serde_json::to_string(&self.get(session)).unwrap())
+    }
+
     pub fn new() -> Self {
         WorkingDirectory {
             default_directory: std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/")),

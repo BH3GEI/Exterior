@@ -6,7 +6,7 @@
 ## 里程碑
 
 - [x] M1 脚手架 + 粗后端 + 最小前端（PR #1，场景 1/2 手动验证）——注意：SPEC 更新后后端将重写为内核+插件
-- [x] M0 第 0 节内核（PR 见 feat/kernel；本地 10/10 通过 ×3，CI 待验）
+- [x] M0 第 0 节内核（PR #2 已 merge；CI ubuntu+macOS 双平台通过）
   - [x] cordis 插件框架（具名服务/inject 顺序/事件总线/profile 文件）
   - [x] JSON-RPC stdio 服务（initialize、session/prompt、session/wait、working-directory get/set、shutdown；通知 session.event、session.status）
   - [x] 会话事件日志 + surface 推导（turn/step/user/assistant/tool/system/request 事件）
@@ -19,7 +19,7 @@
   - [x] agent-loop：turn/step、取消保留已流出文本、maxParallelToolCalls 10、fork
   - [x] jobs + timer（最小实现）
   - [x] §0.5 十项 e2e 全绿
-- [ ] M2 Exterior 插件：节点 DAG 替代线性会话投影（不改内核）；GUI 接入内核
+- [ ] M2 Exterior 插件（前置条件已满足：持久化/系统提示等已是可替换服务，agent.rs 只走 kernel.get）：节点 DAG 替代线性会话投影（不改内核）；GUI 接入内核
 - [ ] M3 GUI 端到端测试（§5.2 十场景）+ CI
 
 ## §0.5 内核验收（每条一个 e2e）
@@ -33,7 +33,8 @@
 - [x] 0.7 重试：先 500 后正常；日志有 llm/retry；结果正确
 - [x] 0.8 恢复：重启进程同 sessionId 发消息，请求含之前历史
 - [x] 0.9 profile：用户 profile 关闭插件后工具列表变化
-- [x] 0.10 与原版一致：同一假服务器同一脚本，系统提示/工具 schema/消息序列与 model-visible.json 一致
+- [x] 0.10 与原版一致
+- [x] 0.11 持久化可关可换：关掉 jsonl 不落盘；换内存实现重启丢历史
 
 ## 验收场景（SPEC §5.2，GUI，待内核完成后接入）
 

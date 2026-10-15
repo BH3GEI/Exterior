@@ -5,6 +5,8 @@ use crate::bash_tool::BashService;
 use crate::cordis::{Kernel, PluginDef};
 use crate::jobs::{JobRegistry, Timer};
 use crate::llm::{read_llm_config, LlmConfig, RetryPolicy};
+use crate::session::SessionServices;
+use crate::sysprompt::{DefaultSystemPrompt, SystemPromptService};
 use crate::tools::ToolsRegistry;
 use crate::workdir::WorkingDirectory;
 use serde_json::Value;
@@ -14,9 +16,33 @@ fn noop(_k: &mut Kernel, _c: &Value) -> Result<(), String> {
     Ok(())
 }
 
+fn start_session(k: &mut Kernel, _c: &Value) -> Result<(), String> {
+    k.provide("session", SessionServices::default());
+    Ok(())
+}
+
 fn start_llm(k: &mut Kernel, _c: &Value) -> Result<(), String> {
     let cfg = read_llm_config()?;
     k.provide("llm", cfg);
+    Ok(())
+}
+
+fn start_sessions_jsonl(k: &mut Kernel, _c: &Value) -> Result<(), String> {
+    let ss: Arc<SessionServices> = k.get("session").ok_or("session-persistence-jsonl 需要 session 服务")?;
+    *ss.persistence.write().unwrap() = Some(Arc::new(crate::persist::JsonlPersistence));
+    k.provide("sessions", ());
+    Ok(())
+}
+
+fn start_sessions_memory(k: &mut Kernel, _c: &Value) -> Result<(), String> {
+    let ss: Arc<SessionServices> = k.get("session").ok_or("session-persistence-memory 需要 session 服务")?;
+    *ss.persistence.write().unwrap() = Some(Arc::new(crate::persist::MemoryPersistence::default()));
+    k.provide("sessions", ());
+    Ok(())
+}
+
+fn start_sysprompt(k: &mut Kernel, _c: &Value) -> Result<(), String> {
+    k.provide("systemPrompt", DefaultSystemPrompt);
     Ok(())
 }
 
@@ -87,6 +113,11 @@ fn start_agent(k: &mut Kernel, c: &Value) -> Result<(), String> {
         .unwrap_or_default();
     let retry = k.get::<RetryPolicy>("retry").map(|r| (*r).clone());
     let tools: Arc<ToolsRegistry> = k.get("tools").ok_or("agent 需要 tools 服务")?;
+    let session_services: Arc<SessionServices> = k.get("session").ok_or("agent 需要 session 服务")?;
+    let sysprompt: Arc<dyn SystemPromptService> = k
+        .get::<DefaultSystemPrompt>("systemPrompt")
+        .map(|p| p as Arc<dyn SystemPromptService>)
+        .ok_or("agent 需要 systemPrompt 服务")?;
     let max_parallel = c.get("maxParallelToolCalls").and_then(Value::as_u64).unwrap_or(10) as usize;
     let mgr = AgentManager {
         agents: std::sync::Mutex::new(std::collections::HashMap::new()),
@@ -96,6 +127,8 @@ fn start_agent(k: &mut Kernel, c: &Value) -> Result<(), String> {
         bash,
         llm_providers: llm.providers.clone(),
         retry,
+        session_services,
+        sysprompt,
         bash_config,
         tools,
         max_parallel_tool_calls: max_parallel,
@@ -113,11 +146,12 @@ pub static PLUGIN_DEFS: &[&PluginDef] = &[
     &PluginDef { name: "sdk-app", service: "sdkAppStartup", start: noop },
     &PluginDef { name: "llm", service: "llm", start: start_llm },
     &PluginDef { name: "llm-retry", service: "retry", start: start_retry },
-    &PluginDef { name: "session", service: "session", start: noop },
+    &PluginDef { name: "session", service: "session", start: start_session },
     &PluginDef { name: "session-projection", service: "sessionProjections", start: noop },
-    &PluginDef { name: "session-persistence-jsonl", service: "sessions", start: noop },
+    &PluginDef { name: "session-persistence-jsonl", service: "sessions", start: start_sessions_jsonl },
+    &PluginDef { name: "session-persistence-memory", service: "sessions", start: start_sessions_memory },
     &PluginDef { name: "session-title", service: "sessionTitle", start: start_title },
-    &PluginDef { name: "system-prompt", service: "systemPrompt", start: noop },
+    &PluginDef { name: "system-prompt", service: "systemPrompt", start: start_sysprompt },
     &PluginDef { name: "working-directory", service: "workingDirectory", start: start_workdir },
     &PluginDef { name: "tool-working-directory", service: "workingDirectoryTool", start: start_tool_workdir },
     &PluginDef { name: "tools", service: "tools", start: start_tools },

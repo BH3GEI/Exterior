@@ -37,6 +37,10 @@ pub struct AgentManager {
     pub bash: Arc<BashService>,
     pub llm_providers: Vec<llm::ProviderCfg>,
     pub retry: Option<RetryPolicy>, // llm-retry 插件存在时启用
+    /// 持久化实现（"sessions" 服务槽，后绑定；未装 session-persistence-* 插件时为 None）
+    pub session_services: Arc<crate::session::SessionServices>,
+    /// 系统提示服务（"systemPrompt"）
+    pub sysprompt: Arc<dyn crate::sysprompt::SystemPromptService>,
     pub bash_config: BashConfig,
     pub tools: Arc<crate::tools::ToolsRegistry>, // 每步动态读取（插件注册的工具在此）
     pub max_parallel_tool_calls: usize,
@@ -52,8 +56,10 @@ impl AgentManager {
     pub fn append_full(&self, session_id: &str, kind: &str, data: Value, surface_op: Option<Value>, srcs: Option<Vec<u64>>) {
         let Some(agent) = self.get(session_id) else { return };
         let ev = agent.session.lock().unwrap().append_full(kind, data, surface_op, srcs);
-        if let Err(e) = crate::persist::persist_event(session_id, &ev) {
-            eprintln!("[persist] 写盘失败 {session_id} {kind}: {e}");
+        if let Some(p) = self.session_services.persistence.read().unwrap().as_ref() {
+            if let Err(e) = p.persist_event(session_id, &ev) {
+                eprintln!("[sessions] 持久化失败 {session_id} {kind}: {e}");
+            }
         }
         self.bus.emit(KernelEvent::SessionEvent { session_id: session_id.into(), event: ev });
     }
@@ -82,11 +88,16 @@ impl AgentManager {
         if let Some(a) = self.get(session_id) {
             return a;
         }
-        let session = match crate::persist::load(session_id) {
+        let persistence = self.session_services.persistence.read().unwrap().clone();
+        let session = match persistence.as_ref().and_then(|p| p.load(session_id)) {
             Some(s) => Arc::new(Mutex::new(s)),
             None => {
                 let s = Session::new(session_id, Some(cwd.into()));
-                crate::persist::persist_header(&s).ok();
+                if let Some(p) = &persistence {
+                    if let Err(e) = p.persist_header(&s) {
+                        eprintln!("[sessions] 持久化失败 {session_id} header: {e}");
+                    }
+                }
                 Arc::new(Mutex::new(s))
             }
         };
@@ -237,12 +248,12 @@ async fn run_step(
     }
 
     // 3. runtime context 快照（变化时追加；对应 RuntimeContextProjection）
-    let snapshot = crate::sysprompt::context_snapshot(&[crate::workdir::context_text(&cwd)]);
+    let snapshot = mgr.sysprompt.context_snapshot(&[mgr.workdir.context_text(&agent.session.lock().unwrap())]);
     let retained = last_runtime_context(&agent.session.lock().unwrap());
     let snapshot_msg = if !snapshot.is_empty() && retained.as_deref() != Some(snapshot.as_str()) {
         Some(snapshot)
     } else if snapshot.is_empty() && retained.is_some() {
-        Some(crate::sysprompt::CONTEXT_CLEARED.to_string())
+        Some(mgr.sysprompt.context_cleared())
     } else {
         None
     };
@@ -250,7 +261,7 @@ async fn run_step(
         let msg = llm::create_user_message(
             &text,
             json!({"kind": "runtime-context", "form": "snapshot", "sections": [
-                {"name": "working-directory:current", "text": crate::workdir::context_text(&cwd)}
+                {"name": "working-directory:current", "text": mgr.workdir.context_text(&agent.session.lock().unwrap())}
             ]}),
         );
         mgr.append(sid, "user/message", serde_json::to_value(msg).unwrap(), true);
@@ -260,7 +271,7 @@ async fn run_step(
     {
         let has_system = agent.session.lock().unwrap().events.iter().any(|e| e.kind == "system/message");
         if !has_system {
-            let msg = llm::create_system_message(&crate::sysprompt::persona());
+            let msg = llm::create_system_message(&mgr.sysprompt.persona());
             mgr.append(
                 sid,
                 "system/message",
@@ -402,7 +413,11 @@ async fn execute_tool_calls(
             let mut s = agent.session.lock().unwrap();
             s.append("tool/call", json!({"turn": turn, "step": step, "callId": id, "name": name, "arguments": args}), false)
         };
-        crate::persist::persist_event(sid, &e).ok();
+        if let Some(p) = mgr.session_services.persistence.read().unwrap().as_ref() {
+            if let Err(err) = p.persist_event(sid, &e) {
+                eprintln!("[sessions] 持久化失败 {sid} tool/call: {err}");
+            }
+        }
         mgr.bus.emit(KernelEvent::SessionEvent { session_id: sid.into(), event: e.clone() });
         call_seqs.push(e.seq);
     }
