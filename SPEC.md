@@ -4,11 +4,82 @@
 
 **最高原则：能不写就不写。** 拿不准要不要加的东西，一律不加。实现中遇到本 spec 没覆盖的情况，先选最少代码的方案，再在 PR 里说明。
 
+**唯一固定的约束：模型可用的工具只有 bash。** 其余部分（模型接入、会话存储、上下文组装、重试、系统提示、界面）全部是插件，可以替换、关闭或新增。
+
+**开发顺序：先完成第 0 节（Rust 版 DeepSeek Harness minimal 内核），通过第 0 节的验收后，再开始第 1–5 节的界面工作。**
+
 ## 两件最重要的事
 
 **1. GUI 就是产品。** 后端只是三件很薄的事，Exterior 和一个对话框的区别全在界面上：网络怎么长出来、分支怎么展开、折叠怎么收起。界面卡顿、布局乱跳、点了没反应，都等于功能没做。界面上花的功夫应该远多于后端。
 
 **2. 端到端测试是验收的唯一标准。** 第 5 节的每个场景都必须是一个**自动化**的端到端测试：启动真实的应用，像用户一样点击和打字，检查界面上出现了什么、`nodes.jsonl` 里写了什么。单元测试可以有，但不能代替端到端测试。一个场景没有通过的端到端测试，就当它没做。
+
+---
+
+## 0. 第一步：Rust 版 DeepSeek Harness minimal 内核
+
+### 0.1 目标
+
+用 Rust 实现 DeepSeek Harness 的 `sdk-minimal` profile（`dsh --profile sdk-minimal`），行为与原版一致。Exterior 的 agent 能力全部来自这个内核，界面只是它的一个客户端。
+
+参考实现：
+
+- 仓库：https://github.com/deepseek-ai/deepseek-harness （编写本节时参照的版本为 `release-0.2.1-alpha.2`，commit `d7432673`）
+- profile 定义：`packages/bundle/sdk-minimal/cordis.patch.yml`。该文件列出的每一行都对应本节的一个插件。
+- 插件框架：`vendor/cordis`、`vendor/loader`
+- 模型实际收到的请求快照：`scripts/snapshots/python-sdk-single-exe/minimal/model-visible.json`
+
+原版各部分的 TypeScript 规模（`src/` 行数，供估算工作量）：插件框架 cordis 约 2.7k、loader 约 1.1k、agent-loop 约 2.5k、agent 约 1.7k、session 约 3.3k、JSONL 持久化约 5.0k、持久 bash 的 PTY 后端约 1.4k、bash 工具约 0.5k、JSON-RPC 服务约 0.5k、系统提示约 0.7k、重试约 0.3k。
+
+### 0.2 插件框架
+
+对应 cordis + loader，只实现 minimal profile 用到的部分：
+
+- 插件以 Rust crate 形式编译进二进制。第 0 节不要求动态加载。
+- 每个插件注册具名服务，并声明依赖的服务（对应 patch 文件中的 `inject`）。框架按依赖顺序启动，按逆序释放。
+- 事件总线：插件可以发布和订阅事件（如 `session/event`、`agent/status`、`turn/end`）。
+- profile 文件（TOML 或 YAML）决定加载哪些插件，每行包含 `id`、插件名、`config`、`disabled`。启动时读取，用户可用自己的 profile 文件覆盖、关闭或新增行。
+
+### 0.3 插件清单
+
+与 `cordis.patch.yml` 一一对应：
+
+| 插件 | 原版包 | 需要实现的行为 |
+|---|---|---|
+| JSON-RPC 服务 | `dsh-sdk-jsonrpc-server`、`dsh-sdk-protocol` | stdio 上的换行分隔 JSON-RPC 2.0。请求：`initialize`、`session/prompt`、`session/wait`、`session/working-directory/get`、`session/working-directory/set`、`shutdown`。通知：`session.event`、`session.status`。stdout 只输出 JSON-RPC 帧 |
+| 模型接入 | `dsh-llm`、`dsh-llm-deepseek-api-key`、`dsh-deepseek-llm-api-extensions` | 流式调用 + tool calling。原版只接 DeepSeek，本实现接 OpenAI 兼容的 Chat Completions 接口，DeepSeek 作为其中一种配置。凭据从环境变量读取 |
+| 重试 | `dsh-llm-retry` | 在 agent step 边界重试失败的模型请求，重试记录先写入会话日志再退避 |
+| 会话 | `dsh-session`、`dsh-session-projection` | 只追加的事件日志，模型看到的历史由日志推导。支持 fork |
+| JSONL 持久化 | `dsh-session-persistence-jsonl` | 每个会话一个 JSONL 文件，`compression: none`。进程重启后可按 `sessionId` 恢复 |
+| 会话标题 | `dsh-session-title` | 按原版配置生成标题（`fallbackMaxWords: 5` 等） |
+| 系统提示 | `dsh-system-prompt` | 组装系统提示和工具 schema。默认 persona 取 `DSH_SYSTEM_PROMPT`，未设置时为 `You are a helpful software engineer assistant.` |
+| agent 与循环 | `dsh-agent`、`dsh-agent-loop` | 调用模型 → 执行工具 → 重复。`maxParallelToolCalls` 默认 10。取消时保留已经流式输出的文本 |
+| 持久 bash | `dsh-tool-bash-persistent`、`dsh-terminal`、`dsh-terminal-bash`、`dsh-subprocess-local` | 每个 agent 一个持久的 PTY bash，cwd、环境变量、函数、后台任务跨调用保留；同一 agent 的命令串行执行。`timeoutMs` 默认 300000，超时后关闭该 shell 并告知模型下次调用从新 shell 开始。`maxOutputChars` 默认 16000。每条命令结束后追加 `[Command finished with exit code N]`。工具描述文本与原版相同 |
+| 工作目录 | `dsh-working-directory`、`dsh-tool-working-directory` | 会话级工作目录及 `working_directory` 工具 |
+| 文件系统、沙箱策略 | `dsh-fs-local`、`dsh-sandbox-local`、`dsh-sandbox-policy` | 只需 `danger-full-access` 模式，不做任何限制 |
+| MCP 资源 | `dsh-mcp-resources` | 未配置 MCP 服务器时不产生任何工具和提示文本。第 0 节只要求这一行为 |
+| 后台任务、定时器 | `dsh-jobs-local`、`cordis-plugin-timer` | 按原版行为实现 |
+
+### 0.4 Exterior 默认 profile
+
+复刻版在 `sdk-minimal` profile 下必须带上述全部插件，用于和原版比对。Exterior 自己的默认 profile 在此基础上关闭 `working_directory` 工具，使模型可用的工具只有 bash。
+
+### 0.5 第 0 节的验收
+
+全部为端到端测试：启动编译好的二进制，通过 stdio 发送 JSON-RPC，模型使用本地假服务器（另一个 URL），bash 和 JSONL 使用真实环境，每个测试使用独立的临时目录。
+
+1. **单轮**：`initialize` → `session/prompt` → 收到 `session.event` 流 → `session/wait` 返回，最终文本正确。
+2. **持久 shell**：第一次调用 `cd /tmp && export X=1`，第二次调用 `pwd; echo $X`，输出 `/tmp` 和 `1`。
+3. **超时**：把 `timeoutMs` 配置为 2000，执行 `sleep 10`。2 秒左右返回超时说明，shell 被重置，下一次调用正常执行。
+4. **输出截断**：输出超过 `maxOutputChars` 时按原版方式截断并附加说明。
+5. **多个 tool call**：一次返回两个 tool call，两个都执行，结果按顺序回到模型。
+6. **取消**：生成中途取消，已流式输出的文本保留在会话日志中。
+7. **重试**：假服务器先返回一次 500，再返回正常结果。会话日志中有重试记录，最终结果正确。
+8. **恢复**：结束进程后重新启动，用同一个 `sessionId` 发送新消息，模型收到的请求包含之前的历史。
+9. **profile**：在用户 profile 中关闭某个插件（如 `working_directory`），模型请求的工具列表中不再出现该工具。
+10. **与原版一致**：用同一个假服务器、同一份对话脚本，分别运行原版 `dsh --profile sdk-minimal` 和本实现，记录假服务器收到的请求。两边的系统提示、工具 schema、消息序列必须一致（忽略 id、时间戳等每次运行都会变化的字段）。另外与仓库中的 `model-visible.json` 快照比对。
+
+第 0 节的 10 项全部通过后，才开始第 1–5 节。
 
 ---
 
@@ -71,7 +142,7 @@
 
 ## 3. 后端
 
-后端只做三件事：**调 LLM、执行 bash、写 JSONL。**
+后端由第 0 节的内核加 Exterior 专用插件组成。Exterior 专用的部分只有一项：用节点 DAG 替代内核默认的线性会话，按 3.1 的规则组装模型看到的历史。这一部分作为替换 `dsh-session-projection` 对应插件的新插件实现，不修改内核。
 
 ### 3.1 上下文 = 来路
 
@@ -99,7 +170,8 @@
 ### 3.3 bash
 
 - 唯一的工具。`bash -lc "<cmd>"`，工作目录为 `$HOME`。
-- **没有沙箱、没有确认、没有黑名单、没有超时。** 不要写任何检查命令的代码。
+- 由第 0 节的持久 bash 插件提供，行为以第 0 节为准（包括 300 秒超时）。
+- **没有沙箱、没有确认、没有黑名单。** 不要写任何检查命令的代码。
 - 输出边跑边推给前端。
 - 用户可以中止：杀掉进程组，已有输出照常写入节点，`exit_code` 记为中止。
 
@@ -113,8 +185,7 @@
 
 - 记忆系统、索引、向量检索、自动找相关节点
 - 自我保护、看门狗：进程挂了就重启，数据都在 JSONL 里
-- 插件系统
-- 任何 bash 之外的工具
+- 任何 bash 之外的模型工具
 
 ## 4. 前端
 
@@ -190,7 +261,7 @@
 
 ## 6. 规模
 
-后端目标在 1000 行以内。超过的话，先回头看哪些东西可以不写。
+不设行数目标。第 0 节以与原版行为一致为准；Exterior 专用插件应保持小，超过 1000 行时先检查哪些部分可以不写。
 
 ## 7. 还没定的（不要在 v1 里做）
 
