@@ -315,3 +315,86 @@ function normalizeWireRequest(req, home) {
   }
   return { system, tools, messages };
 }
+
+// 0.11 持久化可关可换：关掉 session-persistence-jsonl 后不生成 JSONL 文件；
+// 换成内存实现后进程内正常、重启后历史丢失（行为随实现改变）
+test("0.11 持久化插件可关可换", async (t) => {
+  const port = 18300 + Math.floor(Math.random() * 500);
+
+  // Part A：关闭 session-persistence-jsonl → 不落盘
+  {
+    const home = tmpHome();
+    fs.mkdirSync(path.join(home, ".dsh", "profiles", "sdk-minimal"), { recursive: true });
+    fs.writeFileSync(
+      path.join(home, ".dsh", "profiles", "sdk-minimal", "cordis.patch.yml"),
+      `- insert:\n    - id: sessions\n      name: session-persistence-jsonl\n      disabled: true\n`
+    );
+    fs.writeFileSync(
+      path.join(home, ".dsh", "config.json"),
+      JSON.stringify({ providers: [{ name: "fake", base_url: `http://127.0.0.1:${port}/v1` }] })
+    );
+    const fake = startFakeModel(port);
+    await fake.ready();
+    const client = new KernelClient(home);
+    try {
+      await client.initialize(home);
+      await client.prompt("s11a", "你好");
+      await client.wait("s11a");
+      assert.ok(
+        !fs.existsSync(path.join(home, ".dsh", "sessions")),
+        "关闭持久化后不应生成 sessions 目录"
+      );
+      // 功能本身正常：回答照常到达
+      const assistant = client.sessionEvents("s11a").find((e) => e.type === "assistant/message");
+      assert.ok(assistant, "无持久化时回答照常");
+    } finally {
+      await client.close();
+      fake.kill();
+    }
+  }
+
+  // Part B：换成内存实现 → 进程内恢复可用，重启后历史丢失
+  {
+    const home = tmpHome();
+    fs.mkdirSync(path.join(home, ".dsh", "profiles", "sdk-minimal"), { recursive: true });
+    fs.writeFileSync(
+      path.join(home, ".dsh", "profiles", "sdk-minimal", "cordis.patch.yml"),
+      `- insert:\n    - id: sessions\n      name: session-persistence-jsonl\n      disabled: true\n    - id: sessions-mem\n      name: session-persistence-memory\n`
+    );
+    fs.writeFileSync(
+      path.join(home, ".dsh", "config.json"),
+      JSON.stringify({ providers: [{ name: "fake", base_url: `http://127.0.0.1:${port}/v1` }] })
+    );
+    const fake = startFakeModel(port);
+    await fake.ready();
+    const c1 = new KernelClient(home);
+    try {
+      await c1.initialize(home);
+      await c1.prompt("s11b", "你好");
+      await c1.wait("s11b");
+      assert.ok(
+        !fs.existsSync(path.join(home, ".dsh", "sessions")),
+        "内存实现不写 JSONL 文件"
+      );
+      // 进程内恢复：dispose agent 不结束进程，新建进程才丢 —— 这里直接验证重启
+      await c1.shutdown();
+      await c1.exited;
+
+      const c2 = new KernelClient(home);
+      try {
+        await c2.initialize(home);
+        await c2.prompt("s11b", "又来");
+        await c2.wait("s11b");
+        const reqs = fake.requests();
+        const last = reqs[reqs.length - 1];
+        const text = JSON.stringify(last.messages);
+        assert.ok(!text.includes("这是对外装代脑的回答"), "重启后历史丢失（内存实现不落盘）");
+        assert.ok(text.includes("又来"), "新问题在");
+      } finally {
+        await c2.close();
+      }
+    } finally {
+      fake.kill();
+    }
+  }
+});

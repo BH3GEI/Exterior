@@ -6,6 +6,12 @@ use serde_json::Value;
 
 pub const SESSION_FORMAT_VERSION: u32 = 4;
 
+/// session 服务（cordis 服务名 "session"）：持有可替换的持久化实现（后绑定，启动顺序无关）
+#[derive(Default)]
+pub struct SessionServices {
+    pub persistence: std::sync::RwLock<Option<std::sync::Arc<dyn crate::persist::SessionPersistence>>>,
+}
+
 /// 产生模型消息、可上 surface 的事件类型
 pub const SURFACE_TYPES: [&str; 5] = [
     "system/message",
