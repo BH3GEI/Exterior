@@ -6,7 +6,8 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "test:e2e:kernel": "node --test --test-concurrency=1 e2e/kernel/acceptance.test.mjs"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.8.0",
