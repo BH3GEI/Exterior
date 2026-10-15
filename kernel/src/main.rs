@@ -22,6 +22,9 @@ async fn main() {
             exit(1);
         }
     };
-    let code = exterior_kernel::server::serve_stdio(agents, kernel.bus.clone()).await;
+    let dag = kernel
+        .get::<std::sync::Arc<exterior_kernel::dag::DagProjection>>("dag")
+        .map(|a| (*a).clone());
+    let code = exterior_kernel::server::serve_stdio(agents, kernel.bus.clone(), dag).await;
     exit(code);
 }

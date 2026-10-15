@@ -43,11 +43,12 @@ export function startFakeModel(port) {
 }
 
 export class KernelClient {
-  constructor(home, profile = "sdk-minimal") {
+  constructor(home, profile = "sdk-minimal", dshHome) {
     this.home = home;
-    fs.mkdirSync(path.join(home, ".dsh"), { recursive: true });
+    this.dshHome = dshHome ?? path.join(home, ".dsh");
+    fs.mkdirSync(this.dshHome, { recursive: true });
     this.proc = spawn(KERNEL_BIN, ["--profile", profile], {
-      env: { ...process.env, HOME: home, DSH_HOME: path.join(home, ".dsh") },
+      env: { ...process.env, HOME: home, DSH_HOME: this.dshHome },
       stdio: ["pipe", "pipe", "inherit"],
     });
     this.buf = "";

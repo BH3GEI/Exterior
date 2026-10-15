@@ -5,6 +5,7 @@ use crate::bash_tool::BashService;
 use crate::cordis::{Kernel, PluginDef};
 use crate::jobs::{JobRegistry, Timer};
 use crate::llm::{read_llm_config, LlmConfig, RetryPolicy};
+use crate::projection::LinearProjection;
 use crate::session::SessionServices;
 use crate::sysprompt::{DefaultSystemPrompt, SystemPromptService};
 use crate::tools::ToolsRegistry;
@@ -38,6 +39,21 @@ fn start_sessions_memory(k: &mut Kernel, _c: &Value) -> Result<(), String> {
     let ss: Arc<SessionServices> = k.get("session").ok_or("session-persistence-memory 需要 session 服务")?;
     *ss.persistence.write().unwrap() = Some(Arc::new(crate::persist::MemoryPersistence::default()));
     k.provide("sessions", ());
+    Ok(())
+}
+
+fn start_projection(k: &mut Kernel, _c: &Value) -> Result<(), String> {
+    let ss: Arc<SessionServices> = k.get("session").ok_or("session-projection 需要 session 服务")?;
+    *ss.projection.write().unwrap() = Some(Arc::new(LinearProjection));
+    Ok(())
+}
+
+/// Exterior DAG 插件：替换投影 + 提供 dag 服务
+fn start_dag(k: &mut Kernel, _c: &Value) -> Result<(), String> {
+    let ss: Arc<SessionServices> = k.get("session").ok_or("exterior-dag 需要 session 服务")?;
+    let dag = Arc::new(crate::dag::DagProjection::new());
+    *ss.projection.write().unwrap() = Some(dag.clone());
+    k.provide("dag", dag);
     Ok(())
 }
 
@@ -125,7 +141,7 @@ fn start_agent(k: &mut Kernel, c: &Value) -> Result<(), String> {
         http: reqwest::Client::new(),
         workdir,
         bash,
-        llm_providers: llm.providers.clone(),
+        llm_providers: llm.providers(),
         retry,
         session_services,
         sysprompt,
@@ -147,7 +163,8 @@ pub static PLUGIN_DEFS: &[&PluginDef] = &[
     &PluginDef { name: "llm", service: "llm", start: start_llm },
     &PluginDef { name: "llm-retry", service: "retry", start: start_retry },
     &PluginDef { name: "session", service: "session", start: start_session },
-    &PluginDef { name: "session-projection", service: "sessionProjections", start: noop },
+    &PluginDef { name: "session-projection", service: "sessionProjections", start: start_projection },
+    &PluginDef { name: "exterior-dag", service: "dag", start: start_dag },
     &PluginDef { name: "session-persistence-jsonl", service: "sessions", start: start_sessions_jsonl },
     &PluginDef { name: "session-persistence-memory", service: "sessions", start: start_sessions_memory },
     &PluginDef { name: "session-title", service: "sessionTitle", start: start_title },

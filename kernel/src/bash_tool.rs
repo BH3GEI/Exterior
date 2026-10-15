@@ -212,7 +212,7 @@ impl BashService {
             .clone()
     }
 
-    /// 执行一条命令，返回模型可见文本（含 [Command finished with exit code N]）
+    /// 执行一条命令，返回模型可见文本（含 [Command finished with exit code N]）与退出码
     pub async fn execute(
         &self,
         session: &str,
@@ -220,7 +220,8 @@ impl BashService {
         cwd: &str,
         config: BashConfig,
         cancel: Arc<AtomicBool>,
-    ) -> Result<String, String> {
+        on_chunk: Option<Arc<dyn Fn(&str) + Send + Sync>>,
+    ) -> Result<(String, Option<i64>), String> {
         if command.trim().is_empty() {
             return Err("command must be a non-empty string".into());
         }
@@ -275,11 +276,18 @@ impl BashService {
             Exited(String, Option<i64>),
             Aborted,
         }
+        let mut pushed = 0usize;
         let outcome = loop {
             if cancel.load(Ordering::Relaxed) {
                 break Outcome::Aborted;
             }
             let text = buf.lock().unwrap().clone();
+            if let Some(cb) = &on_chunk {
+                if text.len() > pushed {
+                    cb(&text[pushed..]);
+                    pushed = text.len();
+                }
+            }
             if let Some((out, code)) = extract_output(&text, &start_marker, &end_marker) {
                 break Outcome::Done(out, code);
             }
@@ -302,17 +310,17 @@ impl BashService {
                 if let Some(note) = shell_exit_marker {
                     rendered = append_status_marker(rendered, &note);
                 }
-                Ok(append_status_marker(rendered, &format!("[Command finished with exit code {code}]")))
+                Ok((append_status_marker(rendered, &format!("[Command finished with exit code {code}]")), Some(code)))
             }
             Outcome::Timeout(partial) => {
                 let rendered = maybe_truncate(&partial, config.max_output_chars);
                 self.reset(session);
-                Ok(format!(
+                Ok((format!(
                     "Your command timed out after {} seconds or experienced an OOM error. Below is partial output:\n{}\n{}",
                     config.timeout_ms / 1000,
                     append_status_marker(rendered, TIMEOUT_STATUS_MARKER),
                     SHELL_RESET_MESSAGE,
-                ))
+                ), None))
             }
             Outcome::Exited(partial, code) => {
                 let rendered = maybe_truncate(&partial, config.max_output_chars);
@@ -321,15 +329,15 @@ impl BashService {
                     Some(c) => format!("[shell exited: code {c}]"),
                     None => "[shell exited]".into(),
                 };
-                Ok([append_status_marker(rendered, &marker), SHELL_RESET_MESSAGE.to_string()]
+                Ok(([append_status_marker(rendered, &marker), SHELL_RESET_MESSAGE.to_string()]
                     .into_iter()
                     .filter(|s| !s.is_empty())
                     .collect::<Vec<_>>()
-                    .join("\n"))
+                    .join("\n"), code.map(|c| c as i64)))
             }
             Outcome::Aborted => {
                 self.reset(session);
-                Ok(String::new()) // 中止：空结果，由上层收尾（对应原版 abort 返回 ''）
+                Ok((String::new(), None)) // 中止：空结果，由上层收尾（对应原版 abort 返回 ''）
             }
         }
     }

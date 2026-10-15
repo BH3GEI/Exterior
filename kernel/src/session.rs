@@ -10,6 +10,8 @@ pub const SESSION_FORMAT_VERSION: u32 = 4;
 #[derive(Default)]
 pub struct SessionServices {
     pub persistence: std::sync::RwLock<Option<std::sync::Arc<dyn crate::persist::SessionPersistence>>>,
+    /// 投影服务（sessionProjections）：默认线性，可替换（SPEC §3）
+    pub projection: std::sync::RwLock<Option<std::sync::Arc<dyn crate::projection::SessionProjection>>>,
 }
 
 /// 产生模型消息、可上 surface 的事件类型

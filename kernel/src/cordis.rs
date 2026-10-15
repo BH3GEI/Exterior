@@ -16,6 +16,10 @@ pub enum KernelEvent {
     SessionEvent { session_id: String, event: Event },
     /// agent 状态迁移（对应 agent/status）
     AgentStatus { session_id: String, status: String },
+    /// assistant 流式增量（对应 agent/assistant-stream）
+    AssistantDelta { session_id: String, text: String },
+    /// bash 输出增量（SPEC §3.3：输出边跑边推）
+    BashChunk { session_id: String, chunk: String },
 }
 
 #[derive(Clone)]

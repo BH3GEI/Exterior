@@ -19,7 +19,8 @@
   - [x] agent-loop：turn/step、取消保留已流出文本、maxParallelToolCalls 10、fork
   - [x] jobs + timer（最小实现）
   - [x] §0.5 十项 e2e 全绿
-- [ ] M2 Exterior 插件（前置条件已满足：持久化/系统提示等已是可替换服务，agent.rs 只走 kernel.get）：节点 DAG 替代线性会话投影（不改内核）；GUI 接入内核
+- [x] M2 Exterior 插件：dag.rs（DAG 存储+投影+think_and_run）替换线性投影；GUI 经 src-tauri 薄壳接内核；exterior/think JSON-RPC（手机端预留）
+  - DAG e2e：分支/合并上下文、bash 节点、换模型 3 项全绿；GUI 手动验证场景 1/2/3/6/7（4/5/9/10 的界面操作留 M3 WebdriverIO）：节点 DAG 替代线性会话投影（不改内核）；GUI 接入内核
 - [ ] M3 GUI 端到端测试（§5.2 十场景）+ CI
 
 ## §0.5 内核验收（每条一个 e2e）

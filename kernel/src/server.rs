@@ -19,7 +19,7 @@ pub struct ServerState {
     pub max_tokens: Option<u64>,
 }
 
-pub async fn serve_stdio(agents: Arc<AgentManager>, bus: crate::cordis::EventBus) -> i32 {
+pub async fn serve_stdio(agents: Arc<AgentManager>, bus: crate::cordis::EventBus, dag: Option<Arc<crate::dag::DagProjection>>) -> i32 {
     let state = Arc::new(tokio::sync::Mutex::new(ServerState {
         initialized: false,
         cwd: std::env::current_dir().unwrap_or_default().to_string_lossy().into(),
@@ -28,6 +28,22 @@ pub async fn serve_stdio(agents: Arc<AgentManager>, bus: crate::cordis::EventBus
         max_tokens: None,
     }));
     let stdout = Arc::new(tokio::sync::Mutex::new(tokio::io::stdout()));
+
+    // DAG 事件转发为 exterior.event 通知（Exterior 的 JSON-RPC 接口，将来手机端也走这个）
+    if let Some(dag) = &dag {
+        let stdout = stdout.clone();
+        let mut rx = dag.events.subscribe();
+        tokio::spawn(async move {
+            loop {
+                let Ok(ev) = rx.recv().await else { continue };
+                let line = json!({"jsonrpc": "2.0", "method": "exterior.event", "params": serde_json::to_value(&ev).unwrap()});
+                let mut out = stdout.lock().await;
+                let _ = out.write_all(serde_json::to_string(&line).unwrap().as_bytes()).await;
+                let _ = out.write_all(b"\n").await;
+                let _ = out.flush().await;
+            }
+        });
+    }
 
     // 通知转发
     {
@@ -43,6 +59,8 @@ pub async fn serve_stdio(agents: Arc<AgentManager>, bus: crate::cordis::EventBus
                     KernelEvent::AgentStatus { session_id, status } => {
                         ("session.status", json!({"sessionId": session_id, "status": status}))
                     }
+                    // 增量事件不属于 SDK 协议通知；GUI 经 DAG 事件通道拿
+                    KernelEvent::AssistantDelta { .. } | KernelEvent::BashChunk { .. } => continue,
                 };
                 let line = json!({"jsonrpc": "2.0", "method": method, "params": params});
                 let mut out = stdout.lock().await;
@@ -83,8 +101,9 @@ pub async fn serve_stdio(agents: Arc<AgentManager>, bus: crate::cordis::EventBus
         let state = state.clone();
         let stdout = stdout.clone();
         let Some(id) = id else { continue }; // 通知不处理
+        let dag = dag.clone();
         inflight.push(tokio::spawn(async move {
-            let result = dispatch(&agents, &state, &method, params).await;
+            let result = dispatch(&agents, &state, &dag, &method, params).await;
             let resp = match result {
                 Ok(r) => json!({"jsonrpc": "2.0", "id": id, "result": r}),
                 Err(e) => json!({"jsonrpc": "2.0", "id": id, "error": {"code": -32603, "message": e}}),
@@ -109,10 +128,26 @@ pub async fn serve_stdio(agents: Arc<AgentManager>, bus: crate::cordis::EventBus
 async fn dispatch(
     agents: &Arc<AgentManager>,
     state: &Arc<tokio::sync::Mutex<ServerState>>,
+    dag: &Option<Arc<crate::dag::DagProjection>>,
     method: &str,
     params: Value,
 ) -> Result<Value, String> {
     match method {
+        "exterior/think" => {
+            let dag = dag.as_ref().ok_or("exterior/think 需要 exterior profile（dag 插件）")?;
+            let parents: Vec<String> = params
+                .get("parents")
+                .and_then(Value::as_array)
+                .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+                .unwrap_or_default();
+            let text = params.get("text").and_then(Value::as_str).unwrap_or("").to_string();
+            if text.is_empty() {
+                return Err("exterior/think: text 不能为空".into());
+            }
+            let model = params.get("model").and_then(Value::as_str).map(String::from);
+            crate::dag::think_and_run(dag, agents, parents, text, model)
+                .map(|run| json!({"run": run}))
+        }
         "initialize" => {
             let mut st = state.lock().await;
             let cwd = params.get("cwd").and_then(Value::as_str).unwrap_or("");

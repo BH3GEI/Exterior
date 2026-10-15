@@ -7,7 +7,7 @@
     "dev": "vite",
     "build": "tsc && vite build",
     "tauri": "tauri",
-    "test:e2e:kernel": "node --test --test-concurrency=1 e2e/kernel/acceptance.test.mjs"
+    "test:e2e:kernel": "node --test --test-concurrency=1 e2e/kernel/acceptance.test.mjs e2e/kernel/dag.test.mjs"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.8.0",

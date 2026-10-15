@@ -43,13 +43,23 @@ pub fn sdk_minimal() -> Vec<PluginRow> {
         .collect()
 }
 
-/// Exterior 默认 profile：在 sdk-minimal 基础上关闭 working_directory 工具（SPEC §0.4）
+/// Exterior 默认 profile（SPEC §0.4）：sdk-minimal 基础上
+/// - 关闭 working_directory 工具（模型只有 bash）
+/// - 关闭 JSONL 持久化（Exterior 的存储是 nodes.jsonl，SPEC §2.2）
+/// - 不加 sdk-jsonrpc-server（GUI 在进程内直连）；加 exterior-dag（DAG 投影替换线性投影）
 pub fn exterior_default() -> Vec<PluginRow> {
     let mut rows = sdk_minimal();
     for r in &mut rows {
-        if r.id == "tool-working-directory" {
+        if r.id == "tool-working-directory" || r.id == "sessions" || r.id == "sdk-jsonrpc-server" {
             r.disabled = true;
         }
     }
+    rows.push(PluginRow {
+        id: "exterior-dag".into(),
+        name: "exterior-dag".into(),
+        config: json!({}),
+        disabled: false,
+        inject: vec!["session".into()],
+    });
     rows
 }

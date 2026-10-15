@@ -3,11 +3,13 @@
 pub mod agent;
 pub mod bash_tool;
 pub mod cordis;
+pub mod dag;
 pub mod jobs;
 pub mod llm;
 pub mod persist;
 pub mod plugins;
 pub mod profile;
+pub mod projection;
 pub mod server;
 pub mod session;
 pub mod sysprompt;

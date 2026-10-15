@@ -20,4 +20,5 @@ tokio = { version = "1", features = ["full"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
 futures-util = "0.3"
 uuid = { version = "1", features = ["v4"] }
+ulid = "1"
 libc = "0.2"
